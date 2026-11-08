@@ -1,0 +1,91 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import type { ClickHouseClient } from "@clickhouse/client-common";
+import { createTestClient, getTestDatabaseName } from "../utils";
+
+describe("ClickHouse server errors parsing", () => {
+  let client: ClickHouseClient;
+  beforeEach(() => {
+    client = createTestClient();
+  });
+  afterEach(async () => {
+    await client.close();
+  });
+
+  it('returns "unknown identifier" error', async () => {
+    // Possible error messages here:
+    // (since 24.3+, Cloud SMT): Unknown expression identifier 'number' in scope SELECT number AS FR
+    // (since 23.8+, Cloud RMT): Missing columns: 'number' while processing query: 'SELECT number AS FR', required columns: 'number'
+    // (since 24.9+): Unknown expression identifier `number` in scope SELECT number AS FR
+    // (since 26.10+): Unknown expression identifier `number`. In scope SELECT number AS FR: Note: ...
+    const errorMessagePattern =
+      `((?:Missing columns: 'number' while processing query: 'SELECT number AS FR', required columns: 'number')|` +
+      `(?:Unknown expression identifier ('|\`)number('|\`)\\.? [Ii]n scope SELECT number AS FR))`;
+    await expect(
+      client.query({
+        query: "SELECT number FR",
+      }),
+    ).rejects.toMatchObject(
+      expect.objectContaining({
+        message: expect.stringMatching(errorMessagePattern),
+        code: "47",
+        type: "UNKNOWN_IDENTIFIER",
+      }),
+    );
+  });
+
+  it('returns "unknown table" error', async () => {
+    // Possible error messages here:
+    // (since 24.3+, Cloud SMT): Unknown table expression identifier 'unknown_table' in scope
+    // (since 23.8+, Cloud RMT): Table foo.unknown_table does not exist.
+    // (since 26.10+): Unknown table expression identifier 'unknown_table'. In scope SELECT * FROM unknown_table.
+    const dbName = getTestDatabaseName();
+    const errorMessagePattern =
+      `((?:^Table ${dbName}.unknown_table does not exist.*)|` +
+      `(?:Unknown table expression identifier ('|\`)unknown_table('|\`)\\.? [Ii]n scope))`;
+    await expect(
+      client.query({
+        query: "SELECT * FROM unknown_table",
+      }),
+    ).rejects.toMatchObject(
+      expect.objectContaining({
+        message: expect.stringMatching(errorMessagePattern),
+        code: "60",
+        type: "UNKNOWN_TABLE",
+      }),
+    );
+  });
+
+  it('returns "syntax error" error', async () => {
+    await expect(
+      client.query({
+        query: "SELECT * FRON unknown_table",
+      }),
+    ).rejects.toMatchObject(
+      expect.objectContaining({
+        message: expect.stringContaining("Syntax error: failed at position"),
+        code: "62",
+        type: "SYNTAX_ERROR",
+      }),
+    );
+  });
+
+  it('returns "syntax error" error in a multiline query', async () => {
+    await expect(
+      client.query({
+        query: `
+        SELECT *
+        /* This is:
+         a multiline comment
+        */
+        FRON unknown_table
+        `,
+      }),
+    ).rejects.toMatchObject(
+      expect.objectContaining({
+        message: expect.stringContaining("Syntax error: failed at position"),
+        code: "62",
+        type: "SYNTAX_ERROR",
+      }),
+    );
+  });
+});

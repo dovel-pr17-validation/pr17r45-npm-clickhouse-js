@@ -1,0 +1,34 @@
+import { expect } from "vitest";
+import type { ClickHouseClient } from "@clickhouse/client-common";
+import { sleep } from "../utils";
+
+export const jsonValues = [
+  { id: "42", name: "hello", sku: [0, 1] },
+  { id: "43", name: "world", sku: [2, 3] },
+  { id: "44", name: "foo", sku: [3, 4] },
+  { id: "45", name: "bar", sku: [4, 5] },
+  { id: "46", name: "baz", sku: [6, 7] },
+];
+
+export async function assertJsonValues(
+  client: ClickHouseClient,
+  tableName: string,
+  tryCount = 1,
+  tryDelayMs = 1000,
+) {
+  let result: unknown[] = [];
+  for (let i = 0; i < tryCount; i++) {
+    result = await client
+      .query({
+        query: `SELECT * FROM ${tableName} ORDER BY id ASC`,
+        format: "JSONEachRow",
+      })
+      .then((r) => r.json());
+    if (result.length === jsonValues.length) {
+      break;
+    }
+    // wait a bit before retrying
+    await sleep(tryDelayMs);
+  }
+  expect(result).toEqual(jsonValues);
+}

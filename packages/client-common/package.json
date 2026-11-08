@@ -1,0 +1,33 @@
+{
+  "name": "@clickhouse/client-common",
+  "description": "DEPRECATED: this package is no longer used by @clickhouse/client or @clickhouse/client-web; the shared code is now bundled into each client package. Install @clickhouse/client (Node.js) or @clickhouse/client-web (Web) instead.",
+  "homepage": "https://clickhouse.com",
+  "version": "1.23.0",
+  "license": "Apache-2.0",
+  "keywords": [
+    "clickhouse",
+    "sql",
+    "client"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ClickHouse/clickhouse-js.git"
+  },
+  "private": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "pack": "npm pack",
+    "prepack": "cp ../../LICENSE .",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint --max-warnings=0 .",
+    "lint:fix": "eslint . --fix",
+    "build": "rm -rf dist; tsc"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

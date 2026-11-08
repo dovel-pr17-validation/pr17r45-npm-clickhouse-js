@@ -1,0 +1,148 @@
+name: "upstream-sql-tests"
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "ClickHouse/ClickHouse ref to check out (defaults to the pinned commit)"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    - cron: "0 5 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "tests/clickhouse-test-runner/**"
+      - ".github/workflows/upstream-sql-tests.yml"
+  pull_request:
+    paths:
+      - "tests/clickhouse-test-runner/**"
+      - ".github/workflows/upstream-sql-tests.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: "ClickHouse/ClickHouse"
+  # Pinned ClickHouse commit for the upstream test suite. Floating `master`
+  # drifts ahead of the `head`/`latest` server images (e.g. new tests using
+  # settings the image doesn't know yet -> "Unknown setting ..."), which
+  # spuriously reds this workflow. This SHA is a known-good snapshot (last green
+  # run); bump it deliberately, or override per-run via the workflow_dispatch
+  # `upstream_ref` input.
+  UPSTREAM_REF: "edc2b4454dfed0453003168ee672a1249e7f46e9"
+  # Network resilience: npm's default of 2 fetch retries is not enough for
+  # the transient registry errors (ECONNRESET) we regularly hit in CI.
+  NPM_CONFIG_FETCH_RETRIES: "5"
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: "10000"
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: "60000"
+  NPM_CONFIG_FETCH_TIMEOUT: "600000"
+
+jobs:
+  upstream-sql-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only the released `latest` image. The nightly `head` image rebuilds
+        # ~twice a day and routinely ships EXPLAIN/plan/index output changes and
+        # new settings ahead of any released server, spuriously reding this
+        # workflow (and every PR that touches the test runner). `latest` is a
+        # stable target; bleeding-edge coverage is not worth the daily noise.
+        clickhouse: [latest]
+        # passthrough: stream ClickHouse's own TabSeparated text (transport /
+        # session / settings coverage). rowbinary: decode
+        # RowBinaryWithNamesAndTypes through @clickhouse/rowbinary and re-render
+        # to TabSeparated, exercising the dynamic header->reader path. Each
+        # backend has its own allowlist (see the "Run upstream SQL tests" step).
+        backend: [passthrough, rowbinary]
+        # Round-robin shards keep each job at roughly one minute so the
+        # upstream SQL tests no longer dominate PR CI runtime. Bump
+        # `shard` and `SHARD_TOTAL` together if the allowlist grows enough
+        # that per-shard runtime climbs back above ~1 minute.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - name: Checkout clickhouse-js
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout ClickHouse upstream
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ github.event.inputs.upstream_ref || env.UPSTREAM_REF }}
+          path: tests/clickhouse-test-runner/.upstream/ClickHouse
+          sparse-checkout: |
+            tests/clickhouse-test
+            tests/queries
+            tests/config
+            tests/ci
+            tests/performance
+            docker/test/util
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies for upstream clickhouse-test
+        run: |
+          python -m pip install --upgrade pip
+          pip install jinja2
+
+      - name: Start ClickHouse (version - ${{ matrix.clickhouse }}) in Docker
+        uses: hoverkraft-tech/compose-action@b659c744ee9bed25aea2307c017ad849bd104433 # v3.2.0
+        env:
+          CLICKHOUSE_VERSION: ${{ matrix.clickhouse }}
+        with:
+          compose-file: "docker-compose.yml"
+          down-flags: "--volumes"
+
+      - name: Build test runner
+        run: |
+          npm install
+          npm run build
+
+      - name: Make upstream test script executable
+        run: |
+          chmod +x tests/clickhouse-test-runner/.upstream/ClickHouse/tests/clickhouse-test
+
+      - name: Run upstream SQL tests
+        id: run-tests
+        env:
+          CLICKHOUSE_CLIENT_CLI_LOG: ${{ github.workspace }}/upstream-run.log
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 10
+          TEST_RUNNER_BACKEND: ${{ matrix.backend }}
+        run: |
+          # The rowbinary backend can only validate tests whose decoded types it
+          # can render back to TabSeparated, so it runs a dedicated (smaller)
+          # allowlist; passthrough runs the full one.
+          if [ "${TEST_RUNNER_BACKEND}" = "rowbinary" ]; then
+            export UPSTREAM_TEST_LIST="${{ github.workspace }}/tests/clickhouse-test-runner/rowbinary-allowlist.txt"
+          fi
+          bash tests/clickhouse-test-runner/scripts/run-upstream-tests.sh --no-stateful
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: upstream-sql-tests-${{ matrix.backend }}-${{ matrix.clickhouse }}-shard-${{ matrix.shard }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            upstream-run.log
+            tests/clickhouse-test-runner/.upstream/ClickHouse/tests/queries/**/*.stdout
+            tests/clickhouse-test-runner/.upstream/ClickHouse/tests/queries/**/*.stderr
+            tests/clickhouse-test-runner/.upstream/ClickHouse/tests/queries/**/*.diff
